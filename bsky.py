@@ -31,8 +31,7 @@ import requests
 from atproto import Client
 from mega import Mega
 
-from google.oauth2.credentials import Credentials
-from google.auth.transport.requests import Request
+from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 
 # ---------------------------------------------------------------------------
@@ -84,22 +83,7 @@ def fail(msg):
 def get_sheets_service():
     if not os.path.exists(GOOGLE_CREDS_PATH):
         fail(f"Google credentials file not found at {GOOGLE_CREDS_PATH}")
-    with open(GOOGLE_CREDS_PATH) as f:
-        info = json.load(f)
-    creds = Credentials(
-        token=info.get("token"),
-        refresh_token=info.get("refresh_token"),
-        token_uri=info.get("token_uri"),
-        client_id=info.get("client_id"),
-        client_secret=info.get("client_secret"),
-        scopes=info.get("scopes", SCOPES),
-    )
-    if not creds.valid:
-        if creds.refresh_token:
-            creds.refresh(Request())
-            log("🔄 Refreshed Google OAuth access token")
-        else:
-            fail("Google credentials are invalid/expired and no refresh_token is present")
+    creds = Credentials.from_service_account_file(GOOGLE_CREDS_PATH, scopes=SCOPES)
     return build("sheets", "v4", credentials=creds)
 
 
