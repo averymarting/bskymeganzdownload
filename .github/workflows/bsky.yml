@@ -105,7 +105,7 @@ jobs:
           RCLONE_CONFIG_PATH: rclone.conf
           RCLONE_REMOTE_NAME: mega
           GOOGLE_APPLICATION_CREDENTIALS: google_creds.json
-          GOOGLE_SHEET_ID: "1gclT2XS4pkdAoQPP_lKo8nHVbHZgiuePOacG-ZCkZgg"
+          GOOGLE_SHEET_ID: "1qqGR3d1UqOAPCr6KKiwB0gsbEjX6_4oOzu8EZi_Fp-k"
         run: python bsky.py
       - name: Clean up credentials files
         if: always()
