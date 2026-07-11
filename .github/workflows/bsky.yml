@@ -57,10 +57,18 @@ jobs:
             sudo apt-get update && sudo apt-get install -y ffmpeg
           fi
           ffmpeg -version | head -n 1
+      - name: Install rclone
+        run: |
+          curl https://rclone.org/install.sh | sudo bash
+          rclone version
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+      - name: Write rclone config file
+        env:
+          RCLONE_CONF: ${{ secrets.RCLONE_CONF }}
+        run: printf '%s' "$RCLONE_CONF" > rclone.conf
       - name: Write Google credentials file
         env:
           GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
@@ -93,12 +101,12 @@ jobs:
           CONTENT_TYPE: ${{ github.event.inputs.content_type }}
           MAX_POSTS: ${{ github.event.inputs.max_posts }}
           HASHTAG_COUNT: ${{ github.event.inputs.hashtag_count }}
-          MEGA_EMAIL: ${{ secrets.MEGA_EMAIL }}
-          MEGA_PASSWORD: ${{ secrets.MEGA_PASSWORD }}
           MEGA_FOLDER_NAME: ${{ github.event.inputs.mega_folder_name }}
+          RCLONE_CONFIG_PATH: rclone.conf
+          RCLONE_REMOTE_NAME: mega
           GOOGLE_APPLICATION_CREDENTIALS: google_creds.json
-          GOOGLE_SHEET_ID: "1qqGR3d1UqOAPCr6KKiwB0gsbEjX6_4oOzu8EZi_Fp-k"
+          GOOGLE_SHEET_ID: "1gclT2XS4pkdAoQPP_lKo8nHVbHZgiuePOacG-ZCkZgg"
         run: python bsky.py
-      - name: Clean up credentials file
+      - name: Clean up credentials files
         if: always()
-        run: rm -f google_creds.json
+        run: rm -f google_creds.json rclone.conf
