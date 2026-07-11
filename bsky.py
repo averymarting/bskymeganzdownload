@@ -64,7 +64,7 @@ GOOGLE_SHEET_ID = os.environ.get("GOOGLE_SHEET_ID", "").strip()
 DOWNLOAD_DIR = "downloads"
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
-SHEET_HEADER = ["File Name", "Mega Link", "Type", "Caption", "Hashtags"]
+SHEET_HEADER = ["File Name", "Caption", "Hashtags"]
 
 
 def log(msg):
@@ -93,35 +93,44 @@ def get_first_sheet_title(sheets_service, sheet_id):
 
 
 def ensure_sheet_header(sheets_service, sheet_id, sheet_title):
-    existing = (
-        sheets_service.spreadsheets()
-        .values()
-        .get(spreadsheetId=sheet_id, range=f"{sheet_title}!A1:E1")
-        .execute()
-        .get("values", [])
-    )
+    try:
+        existing = (
+            sheets_service.spreadsheets()
+            .values()
+            .get(spreadsheetId=sheet_id, range=f"{sheet_title}!A1:C1")
+            .execute()
+            .get("values", [])
+        )
+    except Exception as e:
+        fail(f"Could not read sheet header (check sharing/permissions): {e}")
     if not existing:
         sheets_service.spreadsheets().values().update(
             spreadsheetId=sheet_id,
-            range=f"{sheet_title}!A1:E1",
+            range=f"{sheet_title}!A1:C1",
             valueInputOption="RAW",
             body={"values": [SHEET_HEADER]},
         ).execute()
+        log("📝 Wrote sheet header row.")
 
 
 def append_sheet_rows_batch(sheets_service, sheet_id, sheet_title, rows):
     """Single API call for every row collected during the run."""
     if not rows:
-        log("ℹ️ No rows to log to Sheets.")
+        log("ℹ️ No rows to log to Sheets (pending_uploads was empty - check download phase logs above).")
         return
-    sheets_service.spreadsheets().values().append(
-        spreadsheetId=sheet_id,
-        range=f"{sheet_title}!A:E",
-        valueInputOption="USER_ENTERED",
-        insertDataOption="INSERT_ROWS",
-        body={"values": rows},
-    ).execute()
-    log(f"📝 Logged {len(rows)} rows to sheet '{sheet_title}' in one batch.")
+    try:
+        result = sheets_service.spreadsheets().values().append(
+            spreadsheetId=sheet_id,
+            range=f"{sheet_title}!A:C",
+            valueInputOption="USER_ENTERED",
+            insertDataOption="INSERT_ROWS",
+            body={"values": rows},
+        ).execute()
+    except Exception as e:
+        fail(f"Sheets append call failed: {e}")
+    updated_range = result.get("updates", {}).get("updatedRange", "unknown range")
+    updated_rows = result.get("updates", {}).get("updatedRows", 0)
+    log(f"📝 Appended {updated_rows} rows to '{updated_range}' (requested {len(rows)}).")
 
 
 # ---------------------------------------------------------------------------
@@ -137,31 +146,32 @@ def rclone_remote_target():
 
 
 def rclone_upload_all(remote_target):
-    """One-shot copy of the whole download directory to Mega."""
+    """One-shot copy of the whole download directory to Mega, tuned for
+    throughput (parallel transfers/checkers) and resilience (retries with
+    backoff, generous timeouts) since this pushes potentially hundreds of
+    files in a single call."""
     log(f"⬆️ Uploading batch to '{remote_target}' via rclone...")
     result = subprocess.run(
-        ["rclone", "--config", RCLONE_CONFIG_PATH, "copy", DOWNLOAD_DIR, remote_target, "-v"],
+        [
+            "rclone", "--config", RCLONE_CONFIG_PATH, "copy", DOWNLOAD_DIR, remote_target,
+            "--transfers", "8",
+            "--checkers", "16",
+            "--retries", "5",
+            "--low-level-retries", "10",
+            "--contimeout", "30s",
+            "--timeout", "300s",
+            "--stats", "30s",
+            "-v",
+        ],
         capture_output=True, text=True,
     )
+    if result.stdout:
+        log(result.stdout.strip()[-1500:])
     if result.returncode != 0:
         log(f"⚠️ rclone copy failed: {result.stderr.strip()[-800:]}")
         return False
     log("✅ Batch upload to Mega complete.")
     return True
-
-
-def rclone_get_link(remote_target, filename):
-    try:
-        result = subprocess.run(
-            ["rclone", "--config", RCLONE_CONFIG_PATH, "link", f"{remote_target}/{filename}"],
-            capture_output=True, text=True, timeout=30,
-        )
-        if result.returncode == 0:
-            return result.stdout.strip()
-        log(f"  ⚠️ Could not get link for {filename}: {result.stderr.strip()[-200:]}")
-    except Exception as e:
-        log(f"  ⚠️ rclone link exception for {filename}: {e}")
-    return None
 
 
 # ---------------------------------------------------------------------------
@@ -379,15 +389,17 @@ def main():
     if pending_uploads:
         remote_target = rclone_remote_target()
         upload_ok = rclone_upload_all(remote_target)
+        if not upload_ok:
+            log("⚠️ Upload reported failure - files below may not actually be on Mega, check the rclone error above.")
 
         for entry in pending_uploads:
             fpath = entry["path"]
             fname = os.path.basename(fpath)
-            link = rclone_get_link(remote_target, fname) if upload_ok else None
-            log(f"  ✅ {fname}" + (f" ({link})" if link else ""))
-            sheet_rows.append([fname, link or "", entry["type"], entry["caption"], entry["hashtags"]])
+            sheet_rows.append([fname, entry["caption"], entry["hashtags"]])
             if os.path.exists(fpath):
                 os.remove(fpath)
+    else:
+        log("ℹ️ Nothing was downloaded this run - skipping upload and sheet logging.")
 
     append_sheet_rows_batch(sheets_service, GOOGLE_SHEET_ID, sheet_title, sheet_rows)
 
