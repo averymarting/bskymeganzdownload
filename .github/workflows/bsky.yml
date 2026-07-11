@@ -74,12 +74,15 @@ jobs:
           except Exception as e:
               print(f'google_creds.json is not valid JSON: {e}')
               sys.exit(1)
-          required = ['token', 'refresh_token', 'client_id', 'client_secret', 'token_uri']
+          required = ['type', 'private_key', 'client_email', 'token_uri']
           missing = [k for k in required if k not in data]
           if missing:
               print(f'google_creds.json is missing fields: {missing}')
               sys.exit(1)
-          print('OAuth token credentials OK')
+          if data.get('type') != 'service_account':
+              print('google_creds.json is not a service account key')
+              sys.exit(1)
+          print(f\"Service account credentials OK ({data['client_email']})\")
           "
       - name: Run scraper
         env:
