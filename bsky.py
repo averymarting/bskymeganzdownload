@@ -1,10 +1,10 @@
 """
-Bluesky -> Mega.nz + Google Sheets scraper
+Bluesky -> Mega.nz (via rclone) + Google Sheets scraper
 
 Scrapes ORIGINAL posts (no reposts) from a single Bluesky username, downloads
 all matching images/videos locally, then uploads them ALL to Mega.nz in one
-batch pass at the end, and logs filename + mega link + caption + hashtags to
-a Google Sheet in a single batched append call.
+batch pass at the end using rclone, and logs filename + mega link + caption +
+hashtags to a Google Sheet in a single batched append call.
 
 Environment variables:
     BSKY_HANDLE, BSKY_APP_PASSWORD   - Bluesky login
@@ -13,9 +13,10 @@ Environment variables:
     CONTENT_TYPE                     - "images", "videos", or "both"
     MAX_POSTS                        - how many posts to scan (default 100)
     HASHTAG_COUNT                    - max hashtags to save per post (default 3)
-    MEGA_EMAIL, MEGA_PASSWORD        - Mega.nz login (put in GitHub Secrets!)
-    MEGA_FOLDER_NAME                 - Mega folder name (created if missing)
-    GOOGLE_APPLICATION_CREDENTIALS   - path to Google OAuth user token JSON
+    RCLONE_CONFIG_PATH               - path to rclone.conf (contains obscured Mega creds)
+    RCLONE_REMOTE_NAME               - name of the remote defined in rclone.conf (default "mega")
+    MEGA_FOLDER_NAME                 - folder path on the Mega remote (created if missing)
+    GOOGLE_APPLICATION_CREDENTIALS   - path to Google service-account JSON
     GOOGLE_SHEET_ID                  - target Google Sheet ID
 """
 
@@ -29,7 +30,6 @@ from datetime import datetime
 
 import requests
 from atproto import Client
-from mega import Mega
 
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
@@ -54,8 +54,8 @@ CONTENT_TYPE = os.environ.get("CONTENT_TYPE", "both").strip().lower()
 MAX_POSTS = int(os.environ.get("MAX_POSTS", "100") or 100)
 HASHTAG_COUNT = int(os.environ.get("HASHTAG_COUNT", "3") or 3)
 
-MEGA_EMAIL = os.environ.get("MEGA_EMAIL", "").strip()
-MEGA_PASSWORD = os.environ.get("MEGA_PASSWORD", "").strip()
+RCLONE_CONFIG_PATH = os.environ.get("RCLONE_CONFIG_PATH", "rclone.conf")
+RCLONE_REMOTE_NAME = os.environ.get("RCLONE_REMOTE_NAME", "mega").strip()
 MEGA_FOLDER_NAME = clean_str(os.environ.get("MEGA_FOLDER_NAME", ""))
 
 GOOGLE_CREDS_PATH = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "google_creds.json")
@@ -125,46 +125,43 @@ def append_sheet_rows_batch(sheets_service, sheet_id, sheet_title, rows):
 
 
 # ---------------------------------------------------------------------------
-# Mega.nz helpers
+# Mega.nz helpers (via rclone)
 # ---------------------------------------------------------------------------
-def get_mega_client():
-    if not MEGA_EMAIL or not MEGA_PASSWORD:
-        fail("MEGA_EMAIL / MEGA_PASSWORD are not set")
-    mega = Mega()
-    m = mega.login(MEGA_EMAIL, MEGA_PASSWORD)
-    log("✅ Mega login successful!")
-    return m
+def rclone_remote_target():
+    if not os.path.exists(RCLONE_CONFIG_PATH):
+        fail(f"rclone config file not found at {RCLONE_CONFIG_PATH}")
+    base = f"{RCLONE_REMOTE_NAME}:"
+    if MEGA_FOLDER_NAME:
+        return f"{base}{MEGA_FOLDER_NAME}"
+    return base
 
 
-def get_or_create_mega_folder(m, folder_name):
-    if not folder_name:
-        return None
-    existing = m.find(folder_name)
-    if existing:
-        log(f"📁 Found existing Mega folder '{folder_name}'")
-        return existing[0]
-    created = m.create_folder(folder_name)
-    folder_id = created.get(folder_name) if isinstance(created, dict) else None
-    log(f"📁 Created new Mega folder '{folder_name}'")
-    return folder_id
+def rclone_upload_all(remote_target):
+    """One-shot copy of the whole download directory to Mega."""
+    log(f"⬆️ Uploading batch to '{remote_target}' via rclone...")
+    result = subprocess.run(
+        ["rclone", "--config", RCLONE_CONFIG_PATH, "copy", DOWNLOAD_DIR, remote_target, "-v"],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        log(f"⚠️ rclone copy failed: {result.stderr.strip()[-800:]}")
+        return False
+    log("✅ Batch upload to Mega complete.")
+    return True
 
 
-def upload_file_to_mega(m, filepath, folder_id):
-    """Returns (filename, share_link) or (filename, None) if link retrieval fails."""
-    fname = os.path.basename(filepath)
+def rclone_get_link(remote_target, filename):
     try:
-        if folder_id:
-            uploaded = m.upload(filepath, folder_id)
-        else:
-            uploaded = m.upload(filepath)
-        try:
-            link = m.get_upload_link(uploaded)
-        except Exception:
-            link = None
-        return fname, link
+        result = subprocess.run(
+            ["rclone", "--config", RCLONE_CONFIG_PATH, "link", f"{remote_target}/{filename}"],
+            capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+        log(f"  ⚠️ Could not get link for {filename}: {result.stderr.strip()[-200:]}")
     except Exception as e:
-        log(f"  ⚠️ Mega upload failed for {fname}: {e}")
-        return fname, None
+        log(f"  ⚠️ rclone link exception for {filename}: {e}")
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -380,13 +377,14 @@ def main():
     # -------------------------------------------------------------
     sheet_rows = []
     if pending_uploads:
-        m = get_mega_client()
-        folder_id = get_or_create_mega_folder(m, MEGA_FOLDER_NAME) if MEGA_FOLDER_NAME else None
+        remote_target = rclone_remote_target()
+        upload_ok = rclone_upload_all(remote_target)
 
         for entry in pending_uploads:
             fpath = entry["path"]
-            fname, link = upload_file_to_mega(m, fpath, folder_id)
-            log(f"  ✅ Uploaded to Mega: {fname}" + (f" ({link})" if link else ""))
+            fname = os.path.basename(fpath)
+            link = rclone_get_link(remote_target, fname) if upload_ok else None
+            log(f"  ✅ {fname}" + (f" ({link})" if link else ""))
             sheet_rows.append([fname, link or "", entry["type"], entry["caption"], entry["hashtags"]])
             if os.path.exists(fpath):
                 os.remove(fpath)
