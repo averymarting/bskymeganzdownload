@@ -1,0 +1,101 @@
+name: Bluesky
+on:
+  workflow_dispatch:
+    inputs:
+      target_username:
+        description: "Bluesky handle to scrape (e.g. someone.bsky.social) - original posts only, reposts skipped"
+        required: true
+        type: string
+      mode:
+        description: "Scrape source"
+        required: true
+        type: choice
+        options:
+          - timeline
+          - media
+        default: timeline
+      content_type:
+        description: "What to download"
+        required: true
+        type: choice
+        options:
+          - both
+          - images
+          - videos
+        default: both
+      max_posts:
+        description: "Max number of the user's posts to scan"
+        required: false
+        default: "100"
+        type: string
+      hashtag_count:
+        description: "Max hashtags to save per post"
+        required: false
+        default: "3"
+        type: string
+      mega_folder_name:
+        description: "Mega.nz folder name (created automatically if it doesn't exist)"
+        required: true
+        type: string
+concurrency:
+  group: bsky-scrape
+  cancel-in-progress: true
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Ensure ffmpeg is available
+        run: |
+          if ! command -v ffmpeg &> /dev/null; then
+            sudo apt-get update && sudo apt-get install -y ffmpeg
+          fi
+          ffmpeg -version | head -n 1
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Write Google credentials file
+        env:
+          GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
+        run: printf '%s' "$GOOGLE_CREDENTIALS_JSON" > google_creds.json
+      - name: Validate Google credentials file
+        run: |
+          python -c "
+          import json, sys
+          try:
+              data = json.load(open('google_creds.json'))
+          except Exception as e:
+              print(f'google_creds.json is not valid JSON: {e}')
+              sys.exit(1)
+          required = ['token', 'refresh_token', 'client_id', 'client_secret', 'token_uri']
+          missing = [k for k in required if k not in data]
+          if missing:
+              print(f'google_creds.json is missing fields: {missing}')
+              sys.exit(1)
+          print('OAuth token credentials OK')
+          "
+      - name: Run scraper
+        env:
+          BSKY_HANDLE: ${{ secrets.BSKY_HANDLE }}
+          BSKY_APP_PASSWORD: ${{ secrets.BSKY_APP_PASSWORD }}
+          TARGET_USERNAME: ${{ github.event.inputs.target_username }}
+          MODE: ${{ github.event.inputs.mode }}
+          CONTENT_TYPE: ${{ github.event.inputs.content_type }}
+          MAX_POSTS: ${{ github.event.inputs.max_posts }}
+          HASHTAG_COUNT: ${{ github.event.inputs.hashtag_count }}
+          MEGA_EMAIL: ${{ secrets.MEGA_EMAIL }}
+          MEGA_PASSWORD: ${{ secrets.MEGA_PASSWORD }}
+          MEGA_FOLDER_NAME: ${{ github.event.inputs.mega_folder_name }}
+          GOOGLE_APPLICATION_CREDENTIALS: google_creds.json
+          GOOGLE_SHEET_ID: "1gclT2XS4pkdAoQPP_lKo8nHVbHZgiuePOacG-ZCkZgg"
+        run: python bsky.py
+      - name: Clean up credentials file
+        if: always()
+        run: rm -f google_creds.json
