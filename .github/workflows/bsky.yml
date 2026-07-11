@@ -97,7 +97,7 @@ jobs:
           MEGA_PASSWORD: ${{ secrets.MEGA_PASSWORD }}
           MEGA_FOLDER_NAME: ${{ github.event.inputs.mega_folder_name }}
           GOOGLE_APPLICATION_CREDENTIALS: google_creds.json
-          GOOGLE_SHEET_ID: "1gclT2XS4pkdAoQPP_lKo8nHVbHZgiuePOacG-ZCkZgg"
+          GOOGLE_SHEET_ID: "1qqGR3d1UqOAPCr6KKiwB0gsbEjX6_4oOzu8EZi_Fp-k"
         run: python bsky.py
       - name: Clean up credentials file
         if: always()
