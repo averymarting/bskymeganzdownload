@@ -11,11 +11,13 @@ batch pass, and their File Name + Caption are logged to a Google Sheet.
 
 Duplicate prevention:
     Before anything else, urls_already_downloaded.txt is pulled from the
-    Mega remote. Any scraped image URL already in that file is skipped
-    entirely (not downloaded, not logged). Newly-seen URLs are written into
-    the local copy of that file BEFORE download starts (so a crash mid-run
-    doesn't cause endless re-attempts), and the updated file OVERWRITES the
-    Mega copy at the end of the run (not appended).
+    ROOT of the Mega remote (shared across every folder/run, not per-folder,
+    so the same file protects against duplicates no matter which folder
+    you're scraping into this run). Any scraped image URL already in that
+    file is skipped entirely (not downloaded, not logged). Newly-seen URLs
+    are written into the local copy BEFORE download starts (so a crash
+    mid-run doesn't cause endless re-attempts), and the updated file
+    OVERWRITES the Mega root copy at the end of the run (not appended).
 
 Usage:
     python scrape_upload.py --url "https://example.com/page" --folder-name "MyFolder"
@@ -127,15 +129,21 @@ def scrape_images(url: str, max_idle_scrolls: int, max_images: int | None = None
         log("Page loaded. Waiting for initial images to render...")
         page.wait_for_timeout(2000)
 
-        # Best-effort caption extraction: img alt/title -> common caption
-        # class names -> the block's own trimmed text as a last resort.
+        # Caption comes from the actual visible link text inside
+        # .info h2.elips a (e.g. "Chef now for foods recipes"), never
+        # from the alt/title attribute. Falls back to the same
+        # element's text, then common caption classes, then the
+        # block's own trimmed text as a last resort.
         extract_js = """
         els => els.map(el => {
             const img = el.querySelector('img');
             const src = img ? (img.getAttribute('src') || img.src) : null;
             let caption = '';
-            if (img) {
-                caption = img.getAttribute('alt') || img.getAttribute('title') || '';
+            const capLink = el.querySelector('.info h2.elips a');
+            if (capLink) caption = capLink.textContent.trim();
+            if (!caption) {
+                const capHeading = el.querySelector('.info h2.elips, h2.elips');
+                if (capHeading) caption = capHeading.textContent.trim();
             }
             if (!caption) {
                 const capEl = el.querySelector('.caption, .title, figcaption, .desc, .description');
@@ -272,19 +280,20 @@ def rclone_remote_target(remote_name: str, config_path: str, folder_name: str) -
     return f"{remote_name}:{folder_name}"
 
 
-def pull_dedup_file(remote_target: str, config_path: str):
-    """Fetch the existing dedup list from Mega. If it doesn't exist yet
-    (first run for this folder), start with an empty local file."""
+def pull_dedup_file(remote_root: str, config_path: str):
+    """Fetch the existing dedup list from the ROOT of the Mega remote (shared
+    across every folder this scraper is ever pointed at, not per-folder).
+    If it doesn't exist yet (first run overall), start with an empty file."""
     result = subprocess.run(
         ["rclone", "--config", config_path, "copyto",
-         f"{remote_target}/{DEDUP_FILENAME}", str(DEDUP_LOCAL_PATH)],
+         f"{remote_root}{DEDUP_FILENAME}", str(DEDUP_LOCAL_PATH)],
         capture_output=True, text=True,
     )
     if result.returncode != 0:
         log("No existing urls_already_downloaded.txt on Mega yet - starting fresh.")
         DEDUP_LOCAL_PATH.write_text("")
     else:
-        log("Pulled existing urls_already_downloaded.txt from Mega.")
+        log("Pulled existing urls_already_downloaded.txt from Mega root.")
 
 
 def load_existing_urls() -> set:
@@ -301,18 +310,18 @@ def record_new_urls(urls):
             f.write(u + "\n")
 
 
-def push_dedup_file(remote_target: str, config_path: str):
-    """Overwrite (not append) the remote copy so it always reflects the
-    current local state."""
+def push_dedup_file(remote_root: str, config_path: str):
+    """Overwrite (not append) the copy at the Mega ROOT so it always
+    reflects the current local state, shared across all folders."""
     result = subprocess.run(
         ["rclone", "--config", config_path, "copyto",
-         str(DEDUP_LOCAL_PATH), f"{remote_target}/{DEDUP_FILENAME}"],
+         str(DEDUP_LOCAL_PATH), f"{remote_root}{DEDUP_FILENAME}"],
         capture_output=True, text=True,
     )
     if result.returncode != 0:
         log(f"⚠️ Failed to push updated urls_already_downloaded.txt to Mega: {result.stderr.strip()[-500:]}")
     else:
-        log("✅ urls_already_downloaded.txt updated on Mega.")
+        log("✅ urls_already_downloaded.txt updated on Mega root.")
 
 
 def rclone_upload_all(remote_target: str, config_path: str, transfers: int = 8) -> bool:
@@ -410,9 +419,10 @@ def main():
         log(f"Image limit: none (stop condition = {args.max_idle_scrolls} consecutive idle scrolls)")
 
     remote_target = rclone_remote_target(args.rclone_remote, args.rclone_config, args.folder_name)
+    remote_root = f"{args.rclone_remote}:"
 
-    log("🔎 Checking for previously-downloaded URLs on Mega...")
-    pull_dedup_file(remote_target, args.rclone_config)
+    log("🔎 Checking for previously-downloaded URLs on Mega (shared root file)...")
+    pull_dedup_file(remote_root, args.rclone_config)
     existing_urls = load_existing_urls()
     log(f"{len(existing_urls)} URL(s) already recorded as downloaded.")
 
@@ -445,8 +455,9 @@ def main():
         log("No images were successfully downloaded — nothing to upload.")
 
     # Always push the updated dedup file, even if some downloads failed,
-    # since their URLs were already recorded above.
-    push_dedup_file(remote_target, args.rclone_config)
+    # since their URLs were already recorded above. This goes to the
+    # shared root file, not the per-folder location.
+    push_dedup_file(remote_root, args.rclone_config)
 
     log_to_sheet(args.spreadsheet_id, args.sheet_tab, saved)
 
