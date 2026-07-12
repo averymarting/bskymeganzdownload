@@ -23,7 +23,7 @@ on:
       spreadsheet_id:
         description: "(optional) Google Sheet ID to log File Name + Caption into"
         required: false
-        default: "1OQns3xUPeTQslsw0FaD-a85DAM0Sc_L6BnaGDMqGPmY"
+        default: "1C28ZFsI58AKC4gWfiKLoQgpRTrVpBD_O0f9f7wsSNcM"
         type: string
       sheet_tab:
         description: "(optional) Force a specific tab name — leave blank to auto-use the Mega folder name as the tab"
