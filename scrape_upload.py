@@ -34,6 +34,7 @@ Env vars (used by the GitHub Actions workflow, but work locally too):
 import argparse
 import hashlib
 import os
+import re
 import subprocess
 import sys
 import time
@@ -57,7 +58,6 @@ DEDUP_LOCAL_PATH = Path(DEDUP_FILENAME)
 
 # Default target sheet. Can be overridden with the SPREADSHEET_ID env var / --spreadsheet-id flag.
 DEFAULT_SPREADSHEET_ID = "1OQns3xUPeTQslsw0FaD-a85DAM0Sc_L6BnaGDMqGPmY"
-DEFAULT_SHEET_TAB = "Sheet1"
 SHEET_HEADER = ["File Name", "Caption"]
 
 
@@ -79,8 +79,10 @@ def parse_args():
                    help="Optional cap on total images to scrape/download/upload.")
     p.add_argument("--spreadsheet-id", default=os.environ.get("SPREADSHEET_ID", DEFAULT_SPREADSHEET_ID),
                    help="Google Sheet ID to log file names + captions into")
-    p.add_argument("--sheet-tab", default=os.environ.get("SHEET_TAB", DEFAULT_SHEET_TAB),
-                   help="Tab/sheet name inside the spreadsheet to append rows to")
+    p.add_argument("--sheet-tab", default=os.environ.get("SHEET_TAB") or None,
+                   help="Tab name inside the spreadsheet to append rows to. "
+                        "If omitted, the folder name is used as the tab name "
+                        "(created automatically if it doesn't exist yet).")
     p.add_argument("--download-concurrency", type=int,
                    default=int(os.environ.get("DOWNLOAD_CONCURRENCY", "10")),
                    help="How many images to download in parallel (default: 10)")
@@ -362,6 +364,28 @@ def get_sheets_service():
     return build("sheets", "v4", credentials=creds)
 
 
+def sanitize_sheet_tab_name(name: str) -> str:
+    """Google Sheets tab names can't contain [ ] * ? / \\ : and have a
+    100-char limit, so clean the folder name up before using it as a tab
+    name."""
+    cleaned = re.sub(r'[\[\]\*\?/\\:]', "_", name).strip()
+    return (cleaned or "Sheet")[:100]
+
+
+def ensure_sheet_tab(service, spreadsheet_id: str, tab_name: str):
+    """Create the tab if it doesn't exist yet; do nothing (and definitely
+    don't touch existing data) if it already does."""
+    meta = service.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
+    existing_titles = [s["properties"]["title"] for s in meta.get("sheets", [])]
+    if tab_name in existing_titles:
+        return
+    service.spreadsheets().batchUpdate(
+        spreadsheetId=spreadsheet_id,
+        body={"requests": [{"addSheet": {"properties": {"title": tab_name}}}]},
+    ).execute()
+    log(f"📄 Created new sheet tab '{tab_name}' (folder-specific).")
+
+
 def ensure_sheet_header(service, spreadsheet_id: str, sheet_tab: str):
     try:
         existing = service.spreadsheets().values().get(
@@ -388,6 +412,7 @@ def log_to_sheet(spreadsheet_id: str, sheet_tab: str, saved: list):
 
     log(f"Writing {len(saved)} row(s) to Google Sheet ({sheet_tab})...")
     service = get_sheets_service()
+    ensure_sheet_tab(service, spreadsheet_id, sheet_tab)
     ensure_sheet_header(service, spreadsheet_id, sheet_tab)
 
     rows = [[dest.name, caption] for dest, _src, caption in saved]
@@ -459,7 +484,7 @@ def main():
     # shared root file, not the per-folder location.
     push_dedup_file(remote_root, args.rclone_config)
 
-    log_to_sheet(args.spreadsheet_id, args.sheet_tab, saved)
+    log_to_sheet(args.spreadsheet_id, args.sheet_tab or sanitize_sheet_tab_name(args.folder_name), saved)
 
     log("=== Done ===")
 
